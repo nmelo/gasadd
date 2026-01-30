@@ -21,21 +21,44 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   "ga [flags] [message]",
 	Short: "Queue messages to Claude agents in tmux windows without interrupting",
-	Long: `gasadd queues messages to Claude agents running in tmux windows.
+	Long: `gasadd (ga) queues messages to Claude agents in tmux windows without interrupting.
 
-Unlike gn (gasnudge), this does NOT interrupt the agent. It simply adds
-the message to Claude's input queue and sends Enter. Claude will process
-the message when it's ready.
+WHEN TO USE ga vs gn:
+  ga  - Non-urgent: "when you're done, run tests" (queues without interrupting)
+  gn  - Urgent: "stop now" (sends Escape to interrupt current work)
 
-By default, it only targets windows running Claude in the current session.
-Use --any to also include non-Claude windows.
+BEHAVIOR:
+  - Only targets windows running Claude (auto-detected via process name/version)
+  - Excludes the caller's own window (prevents self-messaging)
+  - Sends text + Enter, letting Claude's queue handle timing
+  - Does NOT send Escape (preserves ongoing work)
 
-Examples:
-  ga "when you're done, run tests"    # Queue to Claude windows only
-  ga --any "hello"                    # Queue to all windows (including non-Claude)
-  ga -w editor -w build "done"        # Queue to specific windows (must have Claude)
-  ga -p "worker-*" "status update"    # Queue to windows matching pattern
-  ga --dry-run "test"                 # Show what would receive the message`,
+CLAUDE DETECTION:
+  Identifies Claude by pane_current_command matching:
+  - "claude" or "node" (direct process)
+  - Version pattern like "2.1.25"
+  - Child processes of shells (inspects via pgrep)
+
+USE CASES FOR AGENT COORDINATION:
+  - Notify workers when a dependency is ready
+  - Broadcast status updates across a swarm
+  - Chain tasks: "when done with X, start Y"
+  - Request status without disrupting flow
+
+EXAMPLES:
+  ga "tests passed, you can merge"       # Queue to all Claude windows
+  ga -w worker-1 "dependency ready"      # Target specific window
+  ga -w worker-1 -w worker-2 "sync"      # Multiple windows
+  ga -p "worker-*" "checkpoint"          # Glob pattern matching
+  ga -s swarm "broadcast message"        # Different tmux session
+  ga --any "hello"                       # Include non-Claude windows
+  ga -a "note to self"                   # Include own window
+  ga -n "test"                           # Dry-run: show targets
+
+RELATED TOOLS:
+  gn (gasnudge) - Interrupt agents urgently (sends Escape + Enter)
+  gp (gaspeek)  - Read output from agent windows
+  gm (gasmail)  - Persistent messaging via beads database`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: runAdd,
 }
