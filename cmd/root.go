@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/nmelo/gasadd/internal/tmux"
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ var (
 	anyFlag     bool
 	allFlag     bool
 	dryRunFlag  bool
+	forceFlag   bool
 )
 
 var rootCmd = &cobra.Command{
@@ -32,6 +34,7 @@ BEHAVIOR:
   - Excludes the caller's own window (prevents self-messaging)
   - Sends text + Enter, letting Claude's queue handle timing
   - Does NOT send Escape (preserves ongoing work)
+  - Detects pending input: if user is typing, retries 3x then skips (use --force to override)
 
 CLAUDE DETECTION:
   Identifies Claude by pane_current_command matching:
@@ -54,6 +57,7 @@ EXAMPLES:
   ga --any "hello"                       # Include non-Claude windows
   ga -a "note to self"                   # Include own window
   ga -n "test"                           # Dry-run: show targets
+  ga -f -w worker-1 "urgent"             # Force send even if user is typing
 
 RELATED TOOLS:
   gn (gasnudge) - Interrupt agents urgently (sends Escape + Enter)
@@ -74,6 +78,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&anyFlag, "any", false, "Include non-Claude windows (default: Claude only)")
 	rootCmd.Flags().BoolVarP(&allFlag, "all", "a", false, "Include current window (default: exclude self)")
 	rootCmd.Flags().BoolVarP(&dryRunFlag, "dry-run", "n", false, "Show what would receive the message")
+	rootCmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Send even if target has pending input")
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -172,9 +177,33 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Execute adds
-	var succeeded, failed int
+	var succeeded, failed, skipped int
 	for _, w := range targets {
 		target := fmt.Sprintf("%s:%d", session, w.Index)
+
+		// Check for pending input (user is typing) unless --force is set
+		if !forceFlag {
+			var hasPending bool
+			const maxRetries = 3
+			const retryDelay = 5 * time.Second
+
+			for attempt := 0; attempt < maxRetries; attempt++ {
+				hasPending, _ = tmux.HasPendingInput(target)
+				if !hasPending {
+					break
+				}
+				if attempt < maxRetries-1 {
+					time.Sleep(retryDelay)
+				}
+			}
+
+			if hasPending {
+				fmt.Fprintf(os.Stderr, "%s: destination window is busy (user is typing) - use --force if your message takes priority, or wait a few seconds and retry\n", w.Name)
+				skipped++
+				continue
+			}
+		}
+
 		if err := tmux.AddMessage(target, message); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to queue message to %s: %v\n", w.Name, err)
 			failed++
@@ -184,13 +213,25 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Report results
-	if failed > 0 {
-		fmt.Printf("Queued to %d window(s), %d failed\n", succeeded, failed)
-		return fmt.Errorf("%d message(s) failed", failed)
-	}
+	_ = currentPaneID // unused but kept for future use
 
-	// Don't print current pane ID in output, just use it for internal logic
-	_ = currentPaneID
+	if failed > 0 || skipped > 0 {
+		var parts []string
+		if succeeded > 0 {
+			parts = append(parts, fmt.Sprintf("queued to %d", succeeded))
+		}
+		if skipped > 0 {
+			parts = append(parts, fmt.Sprintf("%d deferred (user typing)", skipped))
+		}
+		if failed > 0 {
+			parts = append(parts, fmt.Sprintf("%d failed", failed))
+		}
+		fmt.Printf("%s\n", strings.Join(parts, ", "))
+		if failed > 0 {
+			return fmt.Errorf("%d message(s) failed", failed)
+		}
+		return nil
+	}
 
 	fmt.Printf("Queued to %d window(s)\n", succeeded)
 	return nil

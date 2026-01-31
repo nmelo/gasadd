@@ -232,3 +232,30 @@ func ExitCopyMode(target string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// promptPattern matches Claude Code prompt lines
+var promptPattern = regexp.MustCompile(`^❯\s?(.*)$`)
+
+// HasPendingInput checks if the target pane has text after the prompt (user is typing).
+// Returns true if there's pending input, along with the input text.
+func HasPendingInput(target string) (bool, string) {
+	out, err := run("capture-pane", "-t", target, "-p")
+	if err != nil {
+		return false, ""
+	}
+
+	// Find lines starting with the Claude Code prompt (❯)
+	lines := strings.Split(out, "\n")
+	var lastPromptContent string
+	for _, line := range lines {
+		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
+			lastPromptContent = matches[1]
+		}
+	}
+
+	// If there's content after the prompt, user has pending input
+	if strings.TrimSpace(lastPromptContent) != "" {
+		return true, strings.TrimSpace(lastPromptContent)
+	}
+	return false, ""
+}
