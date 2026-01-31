@@ -25,3 +25,15 @@ checksum:
 release:
   draft: false
   prerelease: auto
+
+brews:
+  - repository:
+      owner: nmelo
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/nmelo/gasadd
+    description: Queue messages to Claude agents in tmux windows without interrupting
+    license: MIT
+    install: |
+      bin.install "ga"

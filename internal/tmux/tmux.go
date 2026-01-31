@@ -116,6 +116,9 @@ func AddMessage(target, message string) error {
 	lock.Lock()
 	defer lock.Unlock()
 
+	// Exit copy-mode if target is scrolled up (send-keys hangs in copy-mode)
+	ExitCopyMode(target)
+
 	// 1. Send text in literal mode (handles special characters)
 	if _, err := run("send-keys", "-t", target, "-l", message); err != nil {
 		return err
@@ -211,4 +214,21 @@ func MatchPattern(name, pattern string) bool {
 func SessionExists(session string) bool {
 	_, err := run("has-session", "-t", session)
 	return err == nil
+}
+
+// IsInCopyMode checks if the target pane is in copy-mode (scrolled up)
+func IsInCopyMode(target string) bool {
+	out, err := run("display-message", "-t", target, "-p", "#{pane_in_mode}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) == "1"
+}
+
+// ExitCopyMode sends 'q' to exit copy-mode if the pane is in it
+func ExitCopyMode(target string) {
+	if IsInCopyMode(target) {
+		_, _ = run("send-keys", "-t", target, "q")
+		time.Sleep(50 * time.Millisecond)
+	}
 }
