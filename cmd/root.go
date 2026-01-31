@@ -198,7 +198,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			}
 
 			if hasPending {
-				fmt.Fprintf(os.Stderr, "%s: destination window is busy (user is typing) - use --force if your message takes priority, or wait a few seconds and retry\n", w.Name)
+				fmt.Fprintf(os.Stderr, "destination window %q is busy (user is typing) - use --force if your message takes priority, or wait a few seconds and retry\n", w.Name)
 				skipped++
 				continue
 			}
