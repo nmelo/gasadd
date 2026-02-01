@@ -233,18 +233,20 @@ func ExitCopyMode(target string) {
 	}
 }
 
-// promptPattern matches Claude Code prompt lines
-var promptPattern = regexp.MustCompile(`^❯\s?(.*)$`)
+// promptPattern matches Claude Code prompt lines (with possible ANSI codes before ❯)
+var promptPattern = regexp.MustCompile(`❯\s?(.*)$`)
 
 // HasPendingInput checks if the target pane has text after the prompt (user is typing).
 // Returns true if there's pending input, along with the input text.
+// Ignores autocomplete suggestions which are styled with ANSI escape codes.
 func HasPendingInput(target string) (bool, string) {
-	out, err := run("capture-pane", "-t", target, "-p")
+	// Capture with ANSI codes (-e) to distinguish styled suggestions from real input
+	out, err := run("capture-pane", "-t", target, "-p", "-e")
 	if err != nil {
 		return false, ""
 	}
 
-	// Find lines starting with the Claude Code prompt (❯)
+	// Find lines containing the Claude Code prompt (❯)
 	lines := strings.Split(out, "\n")
 	var lastPromptContent string
 	for _, line := range lines {
@@ -253,9 +255,16 @@ func HasPendingInput(target string) (bool, string) {
 		}
 	}
 
-	// If there's content after the prompt, user has pending input
-	if strings.TrimSpace(lastPromptContent) != "" {
-		return true, strings.TrimSpace(lastPromptContent)
+	content := strings.TrimSpace(lastPromptContent)
+	if content == "" {
+		return false, ""
 	}
-	return false, ""
+
+	// If content starts with ANSI escape sequence, it's a styled suggestion, not user input
+	// ANSI escapes start with ESC (0x1B) followed by [
+	if len(content) >= 2 && content[0] == 0x1b && content[1] == '[' {
+		return false, ""
+	}
+
+	return true, content
 }
