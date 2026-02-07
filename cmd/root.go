@@ -149,11 +149,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Filter to Claude-only by default (unless --any is set)
-		if !anyFlag && !tmux.IsClaudeRunning(w) {
-			continue
-		}
-
 		targets = append(targets, w)
 	}
 
@@ -177,9 +172,16 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Execute adds
-	var succeeded, failed, skipped int
+	var succeeded, failed, skippedTyping, skippedNoClaude int
 	for _, w := range targets {
 		target := fmt.Sprintf("%s:%d", session, w.Index)
+
+		// Verify Claude is running in the target window
+		if !anyFlag && !tmux.IsClaudeRunning(w) {
+			fmt.Fprintf(os.Stderr, "destination window %q has no Claude agent running - start Claude there first, or use --any to send anyway\n", w.Name)
+			skippedNoClaude++
+			continue
+		}
 
 		// Check for pending input (user is typing) unless --force is set
 		if !forceFlag {
@@ -199,7 +201,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 
 			if hasPending {
 				fmt.Fprintf(os.Stderr, "destination window %q is busy (user is typing) - use --force if your message takes priority, or wait a few seconds and retry\n", w.Name)
-				skipped++
+				skippedTyping++
 				continue
 			}
 		}
@@ -215,13 +217,17 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// Report results
 	_ = currentPaneID // unused but kept for future use
 
+	skipped := skippedTyping + skippedNoClaude
 	if failed > 0 || skipped > 0 {
 		var parts []string
 		if succeeded > 0 {
 			parts = append(parts, fmt.Sprintf("queued to %d", succeeded))
 		}
-		if skipped > 0 {
-			parts = append(parts, fmt.Sprintf("%d deferred (user typing)", skipped))
+		if skippedNoClaude > 0 {
+			parts = append(parts, fmt.Sprintf("%d skipped (no Claude)", skippedNoClaude))
+		}
+		if skippedTyping > 0 {
+			parts = append(parts, fmt.Sprintf("%d deferred (user typing)", skippedTyping))
 		}
 		if failed > 0 {
 			parts = append(parts, fmt.Sprintf("%d failed", failed))
