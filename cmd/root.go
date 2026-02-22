@@ -183,15 +183,20 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Check for pending input (user is typing) unless --force is set
+		// Check that Claude Code is at an idle prompt before sending.
+		// This guards against three states that should not receive input:
+		//   PendingInput  - another agent or user is already typing
+		//   NotAtPrompt   - Claude is generating a response or showing an interactive
+		//                   form (e.g. AskUserQuestion), where send-keys would corrupt
+		//                   the form selection or get lost mid-generation
 		if !forceFlag {
-			var hasPending bool
+			var state tmux.ReadyState
 			const maxRetries = 3
 			const retryDelay = 5 * time.Second
 
 			for attempt := 0; attempt < maxRetries; attempt++ {
-				hasPending, _ = tmux.HasPendingInput(target)
-				if !hasPending {
+				state, _ = tmux.CheckInputReady(target)
+				if state == tmux.ReadyForInput {
 					break
 				}
 				if attempt < maxRetries-1 {
@@ -199,8 +204,12 @@ func runAdd(cmd *cobra.Command, args []string) error {
 				}
 			}
 
-			if hasPending {
-				fmt.Fprintf(os.Stderr, "destination window %q is busy (user is typing) - use --force if your message takes priority, or wait a few seconds and retry\n", w.Name)
+			if state != tmux.ReadyForInput {
+				if state == tmux.PendingInput {
+					fmt.Fprintf(os.Stderr, "destination window %q is busy (agent is typing) - use --force if your message takes priority, or wait and retry\n", w.Name)
+				} else {
+					fmt.Fprintf(os.Stderr, "destination window %q is not ready (Claude may be generating or showing a question form) - wait for it to finish and retry\n", w.Name)
+				}
 				skippedTyping++
 				continue
 			}

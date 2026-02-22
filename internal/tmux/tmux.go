@@ -108,6 +108,10 @@ func IsInsideTmux() bool {
 	return os.Getenv("TMUX_PANE") != ""
 }
 
+// maxSendKeysChunk is the safe maximum bytes per tmux send-keys call.
+// tmux has an internal limit (~16326 chars); we stay well below it.
+const maxSendKeysChunk = 4096
+
 // AddMessage sends a message to a tmux window's queue without interrupting.
 // Unlike NudgeWindow, this does NOT send Escape (which would interrupt vim/Claude).
 // Target format: "session:window" (e.g., "main:1" or "main:editor")
@@ -119,20 +123,78 @@ func AddMessage(target, message string) error {
 	// Exit copy-mode if target is scrolled up (send-keys hangs in copy-mode)
 	ExitCopyMode(target)
 
-	// 1. Send text in literal mode (handles special characters)
-	if _, err := run("send-keys", "-t", target, "-l", message); err != nil {
-		return err
+	// Normalize newlines to the two-character literal \n sequence.
+	// Raw \n bytes sent via send-keys -l are interpreted as "insert newline" by
+	// Claude Code's multiline input, leaving the message stuck in the input box
+	// with a trailing blank line that never submits. Encoding them as \n (text)
+	// preserves the structure while keeping the input as a single submittable line.
+	message = strings.ReplaceAll(message, "\r\n", `\n`)
+	message = strings.ReplaceAll(message, "\r", "")
+	message = strings.ReplaceAll(message, "\n", `\n`)
+
+	// Send in chunks to stay under tmux's send-keys size limit (~16326 chars).
+	// Long messages (agent logs, code, detailed status) easily exceed this limit
+	// and fail with "command too long" without chunking.
+	remaining := message
+	for len(remaining) > 0 {
+		chunk := remaining
+		if len(chunk) > maxSendKeysChunk {
+			chunk = remaining[:maxSendKeysChunk]
+		}
+		remaining = remaining[len(chunk):]
+
+		if _, err := run("send-keys", "-t", target, "-l", chunk); err != nil {
+			return err
+		}
+		if len(remaining) > 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 
-	// 2. Brief pause to let text settle
+	// Brief pause to let text settle before sending Enter
 	time.Sleep(100 * time.Millisecond)
 
-	// 3. Send Enter to queue the message (no Escape, no interruption)
+	// Send Enter to submit the message (no Escape, no interruption)
 	if _, err := run("send-keys", "-t", target, "Enter"); err != nil {
 		return fmt.Errorf("failed to send Enter: %w", err)
 	}
 
+	// Handle Claude Code's paste detection. When input arrives faster than human typing,
+	// Claude Code stores the content as "[Pasted text #N]" and the initial Enter
+	// merely confirms the paste reference rather than submitting the message.
+	// A second Enter is needed to actually submit the referenced content.
+	time.Sleep(500 * time.Millisecond)
+	if hasPasteIndicator(target) {
+		_, _ = run("send-keys", "-t", target, "Enter")
+	}
+
 	return nil
+}
+
+// pasteIndicatorPattern matches Claude Code's paste reference placeholder.
+// Handles formats like "[Pasted text #1]" and "[Pasted text #9 +2 lines]".
+var pasteIndicatorPattern = regexp.MustCompile(`\[Pasted text #\d+[^\]]*\]`)
+
+// hasPasteIndicator checks if Claude Code has stored input as a paste reference.
+// When paste detection fires, the input box shows "[Pasted text #N]" and needs
+// a second Enter to submit the referenced content.
+func hasPasteIndicator(target string) bool {
+	out, err := run("capture-pane", "-t", target, "-p")
+	if err != nil {
+		return false
+	}
+	// Only check the last few lines where the active prompt lives.
+	lines := strings.Split(out, "\n")
+	startIdx := len(lines) - 6
+	if startIdx < 0 {
+		startIdx = 0
+	}
+	for _, line := range lines[startIdx:] {
+		if pasteIndicatorPattern.MatchString(line) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsClaudeRunning checks if Claude appears to be running in the window.
@@ -236,35 +298,72 @@ func ExitCopyMode(target string) {
 // promptPattern matches Claude Code prompt lines (with possible ANSI codes before ❯)
 var promptPattern = regexp.MustCompile(`❯\s?(.*)$`)
 
-// HasPendingInput checks if the target pane has text after the prompt (user is typing).
-// Returns true if there's pending input, along with the input text.
-// Ignores autocomplete suggestions which are styled with ANSI escape codes.
-func HasPendingInput(target string) (bool, string) {
-	// Capture with ANSI codes (-e) to distinguish styled suggestions from real input
+// promptSearchWindow is how many lines from the bottom to search for the active prompt.
+// Claude Code's prompt is always near the bottom of the terminal. When it is in a
+// form UI (AskUserQuestion) or generating a response, the ❯ prompt is not visible
+// in this window.
+const promptSearchWindow = 8
+
+// ReadyState describes whether Claude Code is ready to receive queued input.
+type ReadyState int
+
+const (
+	ReadyForInput ReadyState = iota // ❯ prompt visible, no pending text - safe to send
+	PendingInput                    // ❯ prompt visible, text already in the input box
+	NotAtPrompt                     // ❯ prompt not visible - busy, generating, or in a form
+)
+
+// CheckInputReady returns the current input state of a Claude Code window.
+//
+// Only the last promptSearchWindow lines are inspected. When Claude Code is busy
+// (generating a response) or showing an interactive form (AskUserQuestion), the ❯
+// prompt is not present in the bottom of the visible terminal, so this returns
+// NotAtPrompt rather than ReadyForInput. This prevents ga from sending into a form
+// and accidentally dismissing question dialogs.
+func CheckInputReady(target string) (ReadyState, string) {
 	out, err := run("capture-pane", "-t", target, "-p", "-e")
 	if err != nil {
-		return false, ""
+		return NotAtPrompt, ""
 	}
 
-	// Find lines containing the Claude Code prompt (❯)
 	lines := strings.Split(out, "\n")
+	startIdx := len(lines) - promptSearchWindow
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
 	var lastPromptContent string
-	for _, line := range lines {
+	promptFound := false
+	for _, line := range lines[startIdx:] {
 		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
 			lastPromptContent = matches[1]
+			promptFound = true
 		}
+	}
+
+	if !promptFound {
+		return NotAtPrompt, ""
 	}
 
 	content := strings.TrimSpace(lastPromptContent)
 	if content == "" {
-		return false, ""
+		return ReadyForInput, ""
 	}
 
-	// If content starts with ANSI escape sequence, it's a styled suggestion, not user input
-	// ANSI escapes start with ESC (0x1B) followed by [
+	// Styled autocomplete suggestion is not real pending input
 	if len(content) >= 2 && content[0] == 0x1b && content[1] == '[' {
-		return false, ""
+		return ReadyForInput, ""
 	}
 
-	return true, content
+	return PendingInput, content
+}
+
+// HasPendingInput checks if the target pane has text after the prompt (user is typing).
+// Returns true if there's pending input, along with the input text.
+// Ignores autocomplete suggestions which are styled with ANSI escape codes.
+//
+// Deprecated: prefer CheckInputReady which also detects when Claude is busy or in a form.
+func HasPendingInput(target string) (bool, string) {
+	state, text := CheckInputReady(target)
+	return state == PendingInput, text
 }
