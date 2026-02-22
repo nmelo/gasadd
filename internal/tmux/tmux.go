@@ -352,7 +352,6 @@ func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
 }
 
-
 // ReadyState describes whether Claude Code is ready to receive queued input.
 type ReadyState int
 
@@ -364,14 +363,9 @@ const (
 
 // CheckInputReady returns the current input state of a Claude Code window.
 //
-// Finds the last ❯ prompt in the entire visible terminal area, then verifies it
-// is the CURRENT prompt by checking that only blank lines, dividers, and Claude
-// Code status bar lines appear below it. If non-status content appears below the
-// prompt (e.g. an AskUserQuestion form UI), this returns NotAtPrompt.
-//
-// This approach works for both freshly started sessions (where the prompt sits
-// near the top of the visible area with blank space below) and busy sessions
-// (where the prompt sits near the bottom after scrolled output).
+// Finds the last ❯ prompt in the visible terminal area, verifies it is the
+// CURRENT prompt by checking that only blank lines/dividers/status lines appear
+// below it, and then inspects prompt content for pending input.
 func CheckInputReady(target string) (ReadyState, string) {
 	out, err := run("capture-pane", "-t", target, "-p", "-e")
 	if err != nil {
@@ -382,9 +376,11 @@ func CheckInputReady(target string) (ReadyState, string) {
 
 	// Find the last ❯ in the visible terminal area.
 	lastPromptIdx := -1
+	lastPromptContent := ""
 	for i, line := range lines {
-		if promptPattern.MatchString(line) {
+		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
 			lastPromptIdx = i
+			lastPromptContent = matches[1]
 		}
 	}
 
@@ -415,17 +411,19 @@ func CheckInputReady(target string) (ReadyState, string) {
 		return NotAtPrompt, ""
 	}
 
-	// Reached here: the ❯ prompt is the current one and only status/blank
-	// lines appear below it. The prompt is ready to receive input regardless
-	// of whether it shows ghost text or real pending content.
+	// Prompt is current. Detect text already present after ❯.
 	//
-	// We do NOT block on non-empty prompt content here: ghost suggestions
-	// (which have no ANSI codes and look identical to typed text in the
-	// terminal buffer) cannot be reliably distinguished from real pending
-	// input by capture-pane. Sending a message clears any ghost text and
-	// submits cleanly; if there IS real pending input, the retry loop in
-	// AddMessage will detect the stuck text and send extra Enters.
-	return ReadyForInput, ""
+	// We treat non-empty content as PendingInput to avoid corrupting in-flight
+	// drafts by appending/sending another message. ANSI-only content is ignored.
+	rawContent := strings.TrimSpace(lastPromptContent)
+	if rawContent == "" {
+		return ReadyForInput, ""
+	}
+	content := strings.TrimSpace(stripANSI(rawContent))
+	if content == "" {
+		return ReadyForInput, ""
+	}
+	return PendingInput, content
 }
 
 // HasPendingInput checks if the target pane has text after the prompt (user is typing).
