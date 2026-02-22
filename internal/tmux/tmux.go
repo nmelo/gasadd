@@ -115,7 +115,17 @@ const maxSendKeysChunk = 4096
 // AddMessage sends a message to a tmux window's queue without interrupting.
 // Unlike NudgeWindow, this does NOT send Escape (which would interrupt vim/Claude).
 // Target format: "session:window" (e.g., "main:1" or "main:editor")
-func AddMessage(target, message string) error {
+//
+// When bracketedPaste is true (use for Claude Code windows), the message is
+// wrapped in terminal bracketed-paste markers (ESC[200~ ... ESC[201~). This
+// signals to Claude Code that the input is an intentional paste, preventing the
+// [Pasted text #N] confirmation dialog that otherwise appears for large or fast
+// input. The dialog was causing the original Enter to be consumed as a
+// confirmation rather than a submit, leaving messages stuck in the input box.
+//
+// When bracketedPaste is false (use for --any / non-Claude windows), the old
+// approach is used with a fallback paste-indicator check.
+func AddMessage(target, message string, bracketedPaste bool) error {
 	lock := getAddLock(target)
 	lock.Lock()
 	defer lock.Unlock()
@@ -131,6 +141,15 @@ func AddMessage(target, message string) error {
 	message = strings.ReplaceAll(message, "\r\n", `\n`)
 	message = strings.ReplaceAll(message, "\r", "")
 	message = strings.ReplaceAll(message, "\n", `\n`)
+
+	if bracketedPaste {
+		// ESC[200~ signals start of bracketed paste. Claude Code receives this and
+		// treats subsequent characters as paste content rather than keyboard input,
+		// bypassing its paste-detection heuristic entirely.
+		if _, err := run("send-keys", "-t", target, "-l", "\x1b[200~"); err != nil {
+			return err
+		}
+	}
 
 	// Send in chunks to stay under tmux's send-keys size limit (~16326 chars).
 	// Long messages (agent logs, code, detailed status) easily exceed this limit
@@ -151,6 +170,14 @@ func AddMessage(target, message string) error {
 		}
 	}
 
+	if bracketedPaste {
+		// ESC[201~ closes the bracketed paste. Claude Code now has the full
+		// message in its input buffer, ready to submit with Enter.
+		if _, err := run("send-keys", "-t", target, "-l", "\x1b[201~"); err != nil {
+			return err
+		}
+	}
+
 	// Brief pause to let text settle before sending Enter
 	time.Sleep(100 * time.Millisecond)
 
@@ -159,13 +186,13 @@ func AddMessage(target, message string) error {
 		return fmt.Errorf("failed to send Enter: %w", err)
 	}
 
-	// Handle Claude Code's paste detection. When input arrives faster than human typing,
-	// Claude Code stores the content as "[Pasted text #N]" and the initial Enter
-	// merely confirms the paste reference rather than submitting the message.
-	// A second Enter is needed to actually submit the referenced content.
-	time.Sleep(500 * time.Millisecond)
-	if hasPasteIndicator(target) {
-		_, _ = run("send-keys", "-t", target, "Enter")
+	if !bracketedPaste {
+		// Fallback for non-Claude windows: if paste detection still fired, send a
+		// second Enter to submit the [Pasted text #N] reference.
+		time.Sleep(500 * time.Millisecond)
+		if hasPasteIndicator(target) {
+			_, _ = run("send-keys", "-t", target, "Enter")
+		}
 	}
 
 	return nil
