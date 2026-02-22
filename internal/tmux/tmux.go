@@ -347,9 +347,22 @@ var promptPattern = regexp.MustCompile(`❯\s?(.*)$`)
 
 // ansiPattern matches ANSI/VT100 escape sequences for stripping
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;:]*[A-Za-z]|\x1b[^[]`)
+var hintPromptPattern = regexp.MustCompile(`^Try\s+["“].+\.\.\.?["”]?$`)
 
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
+}
+
+func isHintPromptContent(raw, stripped string) bool {
+	if raw == "" || stripped == "" {
+		return false
+	}
+	// Claude idle hints are styled in ANSI and typically rendered as:
+	// Try "edit <filepath> to..."
+	if raw == stripped {
+		return false
+	}
+	return hintPromptPattern.MatchString(stripped)
 }
 
 // ReadyState describes whether Claude Code is ready to receive queued input.
@@ -421,6 +434,9 @@ func CheckInputReady(target string) (ReadyState, string) {
 	}
 	content := strings.TrimSpace(stripANSI(rawContent))
 	if content == "" {
+		return ReadyForInput, ""
+	}
+	if isHintPromptContent(rawContent, content) {
 		return ReadyForInput, ""
 	}
 	return PendingInput, content
