@@ -216,11 +216,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Use bracketed paste for Claude Code windows to prevent the [Pasted text #N]
-		// confirmation dialog. Non-Claude windows (--any) get plain send-keys since
-		// unknown apps may not support the ESC[200~/ESC[201~ paste protocol.
-		bracketedPaste := !anyFlag
-		if err := tmux.AddMessage(target, message, bracketedPaste); err != nil {
+		if err := tmux.AddMessage(target, message); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to queue message to %s: %v\n", w.Name, err)
 			failed++
 		} else {

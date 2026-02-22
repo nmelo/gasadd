@@ -125,7 +125,7 @@ const maxSendKeysChunk = 4096
 //
 // When bracketedPaste is false (use for --any / non-Claude windows), the old
 // approach is used with a fallback paste-indicator check.
-func AddMessage(target, message string, bracketedPaste bool) error {
+func AddMessage(target, message string) error {
 	lock := getAddLock(target)
 	lock.Lock()
 	defer lock.Unlock()
@@ -141,15 +141,6 @@ func AddMessage(target, message string, bracketedPaste bool) error {
 	message = strings.ReplaceAll(message, "\r\n", `\n`)
 	message = strings.ReplaceAll(message, "\r", "")
 	message = strings.ReplaceAll(message, "\n", `\n`)
-
-	if bracketedPaste {
-		// ESC[200~ signals start of bracketed paste. Claude Code receives this and
-		// treats subsequent characters as paste content rather than keyboard input,
-		// bypassing its paste-detection heuristic entirely.
-		if _, err := run("send-keys", "-t", target, "-l", "\x1b[200~"); err != nil {
-			return err
-		}
-	}
 
 	// Send in chunks to stay under tmux's send-keys size limit (~16326 chars).
 	// Long messages (agent logs, code, detailed status) easily exceed this limit
@@ -170,36 +161,27 @@ func AddMessage(target, message string, bracketedPaste bool) error {
 		}
 	}
 
-	if bracketedPaste {
-		// ESC[201~ closes the bracketed paste. Claude Code now has the full
-		// message in its input buffer, ready to submit with Enter.
-		if _, err := run("send-keys", "-t", target, "-l", "\x1b[201~"); err != nil {
-			return err
-		}
-	}
-
-	// Pause to let the paste end-marker be processed before sending Enter.
-	// With bracketed paste, Claude Code needs a moment to exit paste mode
-	// and render the text in the input buffer before it can accept Enter.
-	time.Sleep(200 * time.Millisecond)
+	// Brief pause to let text settle before sending Enter.
+	time.Sleep(100 * time.Millisecond)
 
 	// Send Enter to submit the message (no Escape, no interruption)
 	if _, err := run("send-keys", "-t", target, "Enter"); err != nil {
 		return fmt.Errorf("failed to send Enter: %w", err)
 	}
 
-	// Poll for up to 1.5s to ensure the message was actually submitted.
-	// Two failure modes both require a second Enter:
-	//   1. Paste indicator ([Pasted text #N]): the first Enter confirms the
-	//      paste reference instead of submitting it.
-	//   2. Text still in input: bracketed paste end-marker wasn't processed
-	//      before Enter arrived, so Enter was treated as a literal char.
-	// We retry with short polls rather than a fixed delay to return quickly
-	// on the common case where the first Enter worked.
-	for _, wait := range [4]time.Duration{300 * time.Millisecond, 400 * time.Millisecond, 400 * time.Millisecond, 400 * time.Millisecond} {
-		time.Sleep(wait)
+	// Poll up to 5s for the message to fully submit.
+	// Claude Code's paste detection fires when characters arrive faster than
+	// human typing speed. When detected, the first Enter confirms the paste
+	// reference rather than submitting - leaving [Pasted text #N] or the raw
+	// message text stuck in the input box.
+	//
+	// We start checking at 500ms (giving the paste dialog time to stabilize)
+	// and retry every 500ms. Each retry sends another Enter. The "last ❯ has
+	// content" check catches both the paste indicator and raw text stuck cases.
+	for range 10 {
+		time.Sleep(500 * time.Millisecond)
 		if !hasStuckInput(target) {
-			break // prompt is empty - message was submitted successfully
+			break // prompt is empty or Claude is generating - submitted OK
 		}
 		_, _ = run("send-keys", "-t", target, "Enter")
 	}
@@ -226,29 +208,38 @@ func hasStuckInput(target string) bool {
 		return false
 	}
 	lines := strings.Split(out, "\n")
-	startIdx := len(lines) - 8
-	if startIdx < 0 {
-		startIdx = 0
-	}
-	for _, line := range lines[startIdx:] {
-		// Case 1: paste indicator placeholder
+
+	// Case 1: paste indicator anywhere in the visible area.
+	for _, line := range lines {
 		if pasteIndicatorPattern.MatchString(line) {
 			return true
 		}
-		// Case 2: prompt has non-empty content (text stuck in input)
+	}
+
+	// Case 2: find the LAST ❯ in the visible area (the current input prompt,
+	// not a ❯ from a previous conversation turn further up the terminal).
+	// If the last ❯ has non-empty real content, the message is stuck.
+	var lastContent string
+	promptFound := false
+	for _, line := range lines {
 		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
-			content := strings.TrimSpace(matches[1])
-			if content == "" {
-				continue
-			}
-			// Ignore styled autocomplete suggestions (ghost text has embedded ANSI codes)
-			if strings.ContainsRune(content, '\x1b') {
-				continue
-			}
-			return true
+			lastContent = matches[1]
+			promptFound = true
 		}
 	}
-	return false
+
+	if !promptFound {
+		return false // No prompt visible - Claude is generating (message submitted OK)
+	}
+
+	content := strings.TrimSpace(lastContent)
+	if content == "" {
+		return false // Prompt is empty - submitted successfully
+	}
+	if strings.ContainsRune(content, '\x1b') {
+		return false // Ghost text (has ANSI styling), not real pending input
+	}
+	return true // Prompt has real content - message is stuck
 }
 
 // IsClaudeRunning checks if Claude appears to be running in the window.
