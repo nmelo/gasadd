@@ -241,6 +241,12 @@ func hasStuckInput(target string) bool {
 	if content == "" {
 		return false // Prompt is empty - submitted successfully
 	}
+	// NOTE: If Claude processes a message and returns to idle with a hint
+	// showing within the 5-second retry window, the hint text would trigger
+	// a spurious extra Enter. This is benign (extra Enter on an empty prompt
+	// is a no-op) and extremely unlikely given typical processing times. The
+	// ANSI-presence discriminator used in parseInputReady doesn't apply here
+	// because stuck text also contains cursor-positioning ANSI codes.
 	return true // Prompt has real content - message is stuck
 }
 
@@ -347,22 +353,9 @@ var promptPattern = regexp.MustCompile(`❯\s?(.*)$`)
 
 // ansiPattern matches ANSI/VT100 escape sequences for stripping
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;:]*[A-Za-z]|\x1b[^[]`)
-var hintPromptPattern = regexp.MustCompile(`^Try\s+["“].+\.\.\.?["”]?$`)
 
 func stripANSI(s string) string {
 	return ansiPattern.ReplaceAllString(s, "")
-}
-
-func isHintPromptContent(raw, stripped string) bool {
-	if raw == "" || stripped == "" {
-		return false
-	}
-	// Claude idle hints are styled in ANSI and typically rendered as:
-	// Try "edit <filepath> to..."
-	if raw == stripped {
-		return false
-	}
-	return hintPromptPattern.MatchString(stripped)
 }
 
 // ReadyState describes whether Claude Code is ready to receive queued input.
@@ -384,8 +377,13 @@ func CheckInputReady(target string) (ReadyState, string) {
 	if err != nil {
 		return NotAtPrompt, ""
 	}
+	return parseInputReady(out)
+}
 
-	lines := strings.Split(out, "\n")
+// parseInputReady implements the input-readiness logic on raw capture-pane
+// output. Extracted from CheckInputReady for testability.
+func parseInputReady(captured string) (ReadyState, string) {
+	lines := strings.Split(captured, "\n")
 
 	// Find the last ❯ in the visible terminal area.
 	lastPromptIdx := -1
@@ -425,9 +423,6 @@ func CheckInputReady(target string) (ReadyState, string) {
 	}
 
 	// Prompt is current. Detect text already present after ❯.
-	//
-	// We treat non-empty content as PendingInput to avoid corrupting in-flight
-	// drafts by appending/sending another message. ANSI-only content is ignored.
 	rawContent := strings.TrimSpace(lastPromptContent)
 	if rawContent == "" {
 		return ReadyForInput, ""
@@ -436,7 +431,16 @@ func CheckInputReady(target string) (ReadyState, string) {
 	if content == "" {
 		return ReadyForInput, ""
 	}
-	if isHintPromptContent(rawContent, content) {
+	// Claude Code hints, ghost suggestions, and autocomplete are rendered
+	// with ANSI styling (dim text, colors) which capture-pane -e preserves.
+	// Real user-typed text is plain in the terminal buffer.
+	//
+	// Edge case: if Claude Code re-renders its TUI at the exact moment
+	// capture-pane fires, a cursor-control code could land on the prompt
+	// line alongside real typed text, causing a false-negative (we'd send
+	// into a window with pending input). This matches pre-a9d4b9f behavior
+	// and is preferable to false-positives that block sends to idle windows.
+	if strings.Contains(rawContent, "\x1b") {
 		return ReadyForInput, ""
 	}
 	return PendingInput, content
