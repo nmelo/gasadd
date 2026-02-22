@@ -178,21 +178,30 @@ func AddMessage(target, message string, bracketedPaste bool) error {
 		}
 	}
 
-	// Brief pause to let text settle before sending Enter
-	time.Sleep(100 * time.Millisecond)
+	// Pause to let the paste end-marker be processed before sending Enter.
+	// With bracketed paste, Claude Code needs a moment to exit paste mode
+	// and render the text in the input buffer before it can accept Enter.
+	time.Sleep(200 * time.Millisecond)
 
 	// Send Enter to submit the message (no Escape, no interruption)
 	if _, err := run("send-keys", "-t", target, "Enter"); err != nil {
 		return fmt.Errorf("failed to send Enter: %w", err)
 	}
 
-	if !bracketedPaste {
-		// Fallback for non-Claude windows: if paste detection still fired, send a
-		// second Enter to submit the [Pasted text #N] reference.
-		time.Sleep(500 * time.Millisecond)
-		if hasPasteIndicator(target) {
-			_, _ = run("send-keys", "-t", target, "Enter")
+	// Poll for up to 1.5s to ensure the message was actually submitted.
+	// Two failure modes both require a second Enter:
+	//   1. Paste indicator ([Pasted text #N]): the first Enter confirms the
+	//      paste reference instead of submitting it.
+	//   2. Text still in input: bracketed paste end-marker wasn't processed
+	//      before Enter arrived, so Enter was treated as a literal char.
+	// We retry with short polls rather than a fixed delay to return quickly
+	// on the common case where the first Enter worked.
+	for _, wait := range [4]time.Duration{300 * time.Millisecond, 400 * time.Millisecond, 400 * time.Millisecond, 400 * time.Millisecond} {
+		time.Sleep(wait)
+		if !hasStuckInput(target) {
+			break // prompt is empty - message was submitted successfully
 		}
+		_, _ = run("send-keys", "-t", target, "Enter")
 	}
 
 	return nil
@@ -202,22 +211,40 @@ func AddMessage(target, message string, bracketedPaste bool) error {
 // Handles formats like "[Pasted text #1]" and "[Pasted text #9 +2 lines]".
 var pasteIndicatorPattern = regexp.MustCompile(`\[Pasted text #\d+[^\]]*\]`)
 
-// hasPasteIndicator checks if Claude Code has stored input as a paste reference.
-// When paste detection fires, the input box shows "[Pasted text #N]" and needs
-// a second Enter to submit the referenced content.
-func hasPasteIndicator(target string) bool {
-	out, err := run("capture-pane", "-t", target, "-p")
+// hasStuckInput returns true when the message did not submit cleanly and
+// a second Enter is needed. Covers two cases:
+//
+//  1. Paste indicator: "[Pasted text #N]" is visible near the prompt - the first
+//     Enter confirmed the paste reference rather than submitting the message.
+//
+//  2. Text still in prompt: bracketed paste end-marker wasn't processed before
+//     Enter arrived, so Enter was treated as a literal char and the text is
+//     still sitting in the input box waiting to be submitted.
+func hasStuckInput(target string) bool {
+	out, err := run("capture-pane", "-t", target, "-p", "-e")
 	if err != nil {
 		return false
 	}
-	// Only check the last few lines where the active prompt lives.
 	lines := strings.Split(out, "\n")
-	startIdx := len(lines) - 6
+	startIdx := len(lines) - 8
 	if startIdx < 0 {
 		startIdx = 0
 	}
 	for _, line := range lines[startIdx:] {
+		// Case 1: paste indicator placeholder
 		if pasteIndicatorPattern.MatchString(line) {
+			return true
+		}
+		// Case 2: prompt has non-empty content (text stuck in input)
+		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
+			content := strings.TrimSpace(matches[1])
+			if content == "" {
+				continue
+			}
+			// Ignore styled autocomplete suggestions
+			if len(content) >= 2 && content[0] == 0x1b && content[1] == '[' {
+				continue
+			}
 			return true
 		}
 	}
