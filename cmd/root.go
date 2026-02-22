@@ -67,7 +67,8 @@ RELATED TOOLS:
 	RunE: runAdd,
 }
 
-func Execute() error {
+func Execute(version string) error {
+	rootCmd.Version = version
 	return rootCmd.Execute()
 }
 
