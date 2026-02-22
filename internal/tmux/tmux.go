@@ -232,12 +232,14 @@ func hasStuckInput(target string) bool {
 		return false // No prompt visible - Claude is generating (message submitted OK)
 	}
 
-	content := strings.TrimSpace(lastContent)
+	// Strip ANSI codes before checking. The previous approach used
+	// ContainsRune(content, '\x1b') to detect ghost text, but cursor-
+	// positioning codes (e.g. \x1b[?25l) also appear on lines with real
+	// stuck text, causing false negatives where real stuck messages were
+	// misidentified as ghost text and the retry Enter was never sent.
+	content := strings.TrimSpace(stripANSI(lastContent))
 	if content == "" {
 		return false // Prompt is empty - submitted successfully
-	}
-	if strings.ContainsRune(content, '\x1b') {
-		return false // Ghost text (has ANSI styling), not real pending input
 	}
 	return true // Prompt has real content - message is stuck
 }
