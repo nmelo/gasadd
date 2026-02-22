@@ -241,8 +241,8 @@ func hasStuckInput(target string) bool {
 			if content == "" {
 				continue
 			}
-			// Ignore styled autocomplete suggestions
-			if len(content) >= 2 && content[0] == 0x1b && content[1] == '[' {
+			// Ignore styled autocomplete suggestions (ghost text has embedded ANSI codes)
+			if strings.ContainsRune(content, '\x1b') {
 				continue
 			}
 			return true
@@ -352,11 +352,13 @@ func ExitCopyMode(target string) {
 // promptPattern matches Claude Code prompt lines (with possible ANSI codes before ❯)
 var promptPattern = regexp.MustCompile(`❯\s?(.*)$`)
 
-// promptSearchWindow is how many lines from the bottom to search for the active prompt.
-// Claude Code's prompt is always near the bottom of the terminal. When it is in a
-// form UI (AskUserQuestion) or generating a response, the ❯ prompt is not visible
-// in this window.
-const promptSearchWindow = 8
+// ansiPattern matches ANSI/VT100 escape sequences for stripping
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;:]*[A-Za-z]|\x1b[^[]`)
+
+func stripANSI(s string) string {
+	return ansiPattern.ReplaceAllString(s, "")
+}
+
 
 // ReadyState describes whether Claude Code is ready to receive queued input.
 type ReadyState int
@@ -369,11 +371,14 @@ const (
 
 // CheckInputReady returns the current input state of a Claude Code window.
 //
-// Only the last promptSearchWindow lines are inspected. When Claude Code is busy
-// (generating a response) or showing an interactive form (AskUserQuestion), the ❯
-// prompt is not present in the bottom of the visible terminal, so this returns
-// NotAtPrompt rather than ReadyForInput. This prevents ga from sending into a form
-// and accidentally dismissing question dialogs.
+// Finds the last ❯ prompt in the entire visible terminal area, then verifies it
+// is the CURRENT prompt by checking that only blank lines, dividers, and Claude
+// Code status bar lines appear below it. If non-status content appears below the
+// prompt (e.g. an AskUserQuestion form UI), this returns NotAtPrompt.
+//
+// This approach works for both freshly started sessions (where the prompt sits
+// near the top of the visible area with blank space below) and busy sessions
+// (where the prompt sits near the bottom after scrolled output).
 func CheckInputReady(target string) (ReadyState, string) {
 	out, err := run("capture-pane", "-t", target, "-p", "-e")
 	if err != nil {
@@ -381,35 +386,53 @@ func CheckInputReady(target string) (ReadyState, string) {
 	}
 
 	lines := strings.Split(out, "\n")
-	startIdx := len(lines) - promptSearchWindow
-	if startIdx < 0 {
-		startIdx = 0
-	}
 
-	var lastPromptContent string
-	promptFound := false
-	for _, line := range lines[startIdx:] {
-		if matches := promptPattern.FindStringSubmatch(line); matches != nil {
-			lastPromptContent = matches[1]
-			promptFound = true
+	// Find the last ❯ in the visible terminal area.
+	lastPromptIdx := -1
+	for i, line := range lines {
+		if promptPattern.MatchString(line) {
+			lastPromptIdx = i
 		}
 	}
 
-	if !promptFound {
+	if lastPromptIdx < 0 {
 		return NotAtPrompt, ""
 	}
 
-	content := strings.TrimSpace(lastPromptContent)
-	if content == "" {
-		return ReadyForInput, ""
+	// Verify this is the CURRENT prompt: everything below it must be blank,
+	// a divider (─────), or a Claude Code status bar line (contains │ or ⏵⏵).
+	// If any other content appears below, it's a form UI - not the input prompt.
+	// Lines are stripped of ANSI escape codes before checking since Claude Code
+	// renders dividers and status bars with color/style codes.
+	for _, line := range lines[lastPromptIdx+1:] {
+		t := strings.TrimSpace(stripANSI(line))
+		if t == "" {
+			continue
+		}
+		if strings.TrimLeft(t, "─ ") == "" { // divider: only ─ and spaces remain
+			continue
+		}
+		if strings.Contains(t, "│") { // status bar: uses │ as field separator
+			continue
+		}
+		if strings.HasPrefix(t, "⏵⏵") || strings.HasPrefix(t, "▶▶") { // mode line
+			continue
+		}
+		// Non-status content below the prompt = Claude is busy or showing a form
+		return NotAtPrompt, ""
 	}
 
-	// Styled autocomplete suggestion is not real pending input
-	if len(content) >= 2 && content[0] == 0x1b && content[1] == '[' {
-		return ReadyForInput, ""
-	}
-
-	return PendingInput, content
+	// Reached here: the ❯ prompt is the current one and only status/blank
+	// lines appear below it. The prompt is ready to receive input regardless
+	// of whether it shows ghost text or real pending content.
+	//
+	// We do NOT block on non-empty prompt content here: ghost suggestions
+	// (which have no ANSI codes and look identical to typed text in the
+	// terminal buffer) cannot be reliably distinguished from real pending
+	// input by capture-pane. Sending a message clears any ghost text and
+	// submits cleanly; if there IS real pending input, the retry loop in
+	// AddMessage will detect the stuck text and send extra Enters.
+	return ReadyForInput, ""
 }
 
 // HasPendingInput checks if the target pane has text after the prompt (user is typing).
