@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/nmelo/gasadd/internal/tmux"
 	"github.com/spf13/cobra"
@@ -17,7 +16,7 @@ var (
 	anyFlag     bool
 	allFlag     bool
 	dryRunFlag  bool
-	forceFlag   bool
+	strictFlag  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -34,7 +33,7 @@ BEHAVIOR:
   - Excludes the caller's own window (prevents self-messaging)
   - Sends text + Enter, letting Claude's queue handle timing
   - Does NOT send Escape (preserves ongoing work)
-  - Detects pending input: if user is typing, retries 3x then skips (use --force to override)
+  - Warns if target has pending input but always sends (use --strict to block instead)
 
 CLAUDE DETECTION:
   Identifies Claude by pane_current_command matching:
@@ -57,7 +56,7 @@ EXAMPLES:
   ga --any "hello"                       # Include non-Claude windows
   ga -a "note to self"                   # Include own window
   ga -n "test"                           # Dry-run: show targets
-  ga -f -w worker-1 "urgent"             # Force send even if user is typing
+  ga --strict -w worker-1 "careful"      # Block send if target is busy
 
 RELATED TOOLS:
   gn (gasnudge) - Interrupt agents urgently (sends Escape + Enter)
@@ -79,7 +78,7 @@ func init() {
 	rootCmd.Flags().BoolVar(&anyFlag, "any", false, "Include non-Claude windows (default: Claude only)")
 	rootCmd.Flags().BoolVarP(&allFlag, "all", "a", false, "Include current window (default: exclude self)")
 	rootCmd.Flags().BoolVarP(&dryRunFlag, "dry-run", "n", false, "Show what would receive the message")
-	rootCmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Send even if target has pending input")
+	rootCmd.Flags().BoolVar(&strictFlag, "strict", false, "Block send if target has pending input (default: warn and send anyway)")
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -184,35 +183,25 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Check that Claude Code is at an idle prompt before sending.
-		// This guards against three states that should not receive input:
-		//   PendingInput  - another agent or user is already typing
-		//   NotAtPrompt   - Claude is generating a response or showing an interactive
-		//                   form (e.g. AskUserQuestion), where send-keys would corrupt
-		//                   the form selection or get lost mid-generation
-		if !forceFlag {
-			var state tmux.ReadyState
-			const maxRetries = 3
-			const retryDelay = 5 * time.Second
-
-			for attempt := 0; attempt < maxRetries; attempt++ {
-				state, _ = tmux.CheckInputReady(target)
-				if state == tmux.ReadyForInput {
-					break
-				}
-				if attempt < maxRetries-1 {
-					time.Sleep(retryDelay)
-				}
-			}
-
-			if state != tmux.ReadyForInput {
+		// Quick readiness check: single attempt, no retries.
+		// Default: warn but still send (ga's purpose is to queue messages).
+		// With --strict: block the send like the old behavior.
+		state, _ := tmux.CheckInputReady(target)
+		if state != tmux.ReadyForInput {
+			if strictFlag {
 				if state == tmux.PendingInput {
-					fmt.Fprintf(os.Stderr, "destination window %q is busy (agent is typing) - use --force if your message takes priority, or wait and retry\n", w.Name)
+					fmt.Fprintf(os.Stderr, "destination window %q has pending input (agent or user is typing) - message not sent\n", w.Name)
 				} else {
-					fmt.Fprintf(os.Stderr, "destination window %q is not ready (Claude may be generating or showing a question form) - wait for it to finish and retry\n", w.Name)
+					fmt.Fprintf(os.Stderr, "destination window %q is not at prompt (Claude may be generating or showing a form) - message not sent\n", w.Name)
 				}
 				skippedTyping++
 				continue
+			}
+			// Non-strict: warn on stderr, but send anyway
+			if state == tmux.PendingInput {
+				fmt.Fprintf(os.Stderr, "warning: window %q has pending input, sending anyway\n", w.Name)
+			} else {
+				fmt.Fprintf(os.Stderr, "warning: window %q may be busy, sending anyway\n", w.Name)
 			}
 		}
 
@@ -237,7 +226,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			parts = append(parts, fmt.Sprintf("%d skipped (no Claude)", skippedNoClaude))
 		}
 		if skippedTyping > 0 {
-			parts = append(parts, fmt.Sprintf("%d deferred (user typing)", skippedTyping))
+			parts = append(parts, fmt.Sprintf("%d blocked (busy)", skippedTyping))
 		}
 		if failed > 0 {
 			parts = append(parts, fmt.Sprintf("%d failed", failed))
