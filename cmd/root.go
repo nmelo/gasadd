@@ -82,7 +82,11 @@ func init() {
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
+	// Interpret common escape sequences so agents can use \n for newlines
+	// without needing ANSI-C quoting ($'...') in their shell calls.
 	message := strings.Join(args, " ")
+	message = strings.ReplaceAll(message, `\n`, "\n")
+	message = strings.ReplaceAll(message, `\t`, "\t")
 
 	// Determine session
 	var session string

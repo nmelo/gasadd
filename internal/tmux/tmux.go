@@ -133,14 +133,13 @@ func AddMessage(target, message string) error {
 	// Exit copy-mode if target is scrolled up (send-keys hangs in copy-mode)
 	ExitCopyMode(target)
 
-	// Normalize newlines to the two-character literal \n sequence.
-	// Raw \n bytes sent via send-keys -l are interpreted as "insert newline" by
-	// Claude Code's multiline input, leaving the message stuck in the input box
-	// with a trailing blank line that never submits. Encoding them as \n (text)
-	// preserves the structure while keeping the input as a single submittable line.
-	message = strings.ReplaceAll(message, "\r\n", `\n`)
+	// Normalize Windows line endings; leave \n as actual newlines.
+	// Claude Code's paste detection fires for fast multi-character input (which
+	// send-keys -l always is), so multiline text arrives via the paste dialog
+	// rather than triggering multiline input mode. The hasStuckInput retry loop
+	// below handles paste confirmation by sending additional Enter keypresses.
+	message = strings.ReplaceAll(message, "\r\n", "\n")
 	message = strings.ReplaceAll(message, "\r", "")
-	message = strings.ReplaceAll(message, "\n", `\n`)
 
 	// Send in chunks to stay under tmux's send-keys size limit (~16326 chars).
 	// Long messages (agent logs, code, detailed status) easily exceed this limit
