@@ -430,16 +430,15 @@ func parseInputReady(captured string) (ReadyState, string) {
 	if content == "" {
 		return ReadyForInput, ""
 	}
-	// Claude Code hints, ghost suggestions, and autocomplete are rendered
-	// with ANSI styling (dim text, colors) which capture-pane -e preserves.
-	// Real user-typed text is plain in the terminal buffer.
+	// Ghost text (autocomplete hints) is rendered entirely within ANSI styling
+	// codes, so rawContent starts with \x1b. Real user-typed text starts with
+	// plain characters, even though ANSI codes may follow (e.g. cursor block
+	// \x1b[7m \x1b[0m appended after the typed text).
 	//
-	// Edge case: if Claude Code re-renders its TUI at the exact moment
-	// capture-pane fires, a cursor-control code could land on the prompt
-	// line alongside real typed text, causing a false-negative (we'd send
-	// into a window with pending input). This matches pre-a9d4b9f behavior
-	// and is preferable to false-positives that block sends to idle windows.
-	if strings.Contains(rawContent, "\x1b") {
+	// Check whether the first non-space character is an ANSI escape. If so,
+	// the visible content is a styled hint, not user input.
+	trimmed := strings.TrimLeft(rawContent, " ")
+	if len(trimmed) > 0 && trimmed[0] == '\x1b' {
 		return ReadyForInput, ""
 	}
 	return PendingInput, content

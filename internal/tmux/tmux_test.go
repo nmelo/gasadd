@@ -71,6 +71,12 @@ func TestParseInputReady(t *testing.T) {
 			wantState:   PendingInput,
 			wantContent: "hello",
 		},
+		{
+			name:        "real typed text with cursor block (regression test)",
+			input:       "some output\n❯ half typed message here\x1b[7m \x1b[0m\n\n",
+			wantState:   PendingInput,
+			wantContent: "half typed message here",
+		},
 	}
 
 	for _, tt := range tests {

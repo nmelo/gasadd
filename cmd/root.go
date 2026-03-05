@@ -13,10 +13,11 @@ var (
 	windowFlags []string
 	sessionFlag string
 	patternFlag string
-	anyFlag     bool
-	allFlag     bool
-	dryRunFlag  bool
-	strictFlag  bool
+	anyFlag    bool
+	allFlag    bool
+	dryRunFlag bool
+	strictFlag bool
+	forceFlag  bool
 )
 
 var rootCmd = &cobra.Command{
@@ -33,7 +34,8 @@ BEHAVIOR:
   - Excludes the caller's own window (prevents self-messaging)
   - Sends text + Enter, letting Claude's queue handle timing
   - Does NOT send Escape (preserves ongoing work)
-  - Warns if target has pending input but always sends (use --strict to block instead)
+  - Blocks send if user is typing in the target window (use --force to override)
+  - Warns if target is busy (generating/form) but sends anyway (use --strict to block)
 
 CLAUDE DETECTION:
   Identifies Claude by pane_current_command matching:
@@ -56,7 +58,8 @@ EXAMPLES:
   ga --any "hello"                       # Include non-Claude windows
   ga -a "note to self"                   # Include own window
   ga -n "test"                           # Dry-run: show targets
-  ga --strict -w worker-1 "careful"      # Block send if target is busy
+  ga --force -w worker-1 "urgent"         # Send even if user is typing
+  ga --strict -w worker-1 "careful"      # Also block when target is busy
 
 RELATED TOOLS:
   gn (gasnudge) - Interrupt agents urgently (sends Escape + Enter)
@@ -78,7 +81,8 @@ func init() {
 	rootCmd.Flags().BoolVar(&anyFlag, "any", false, "Include non-Claude windows (default: Claude only)")
 	rootCmd.Flags().BoolVarP(&allFlag, "all", "a", false, "Include current window (default: exclude self)")
 	rootCmd.Flags().BoolVarP(&dryRunFlag, "dry-run", "n", false, "Show what would receive the message")
-	rootCmd.Flags().BoolVar(&strictFlag, "strict", false, "Block send if target has pending input (default: warn and send anyway)")
+	rootCmd.Flags().BoolVarP(&forceFlag, "force", "f", false, "Send even if user is typing in target window")
+	rootCmd.Flags().BoolVar(&strictFlag, "strict", false, "Also block send when target is busy (generating or showing a form)")
 }
 
 func runAdd(cmd *cobra.Command, args []string) error {
@@ -187,26 +191,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Quick readiness check: single attempt, no retries.
-		// Default: warn but still send (ga's purpose is to queue messages).
-		// With --strict: block the send like the old behavior.
-		state, _ := tmux.CheckInputReady(target)
-		if state != tmux.ReadyForInput {
+		// Readiness check: block on pending input (user typing), warn on busy.
+		//   PendingInput: reliable detection (plain text after prompt) -> block by default
+		//   NotAtPrompt:  less reliable (prompt not visible) -> warn but send by default
+		// --force overrides PendingInput blocking, --strict also blocks on NotAtPrompt.
+		state, pendingText := tmux.CheckInputReady(target)
+		if state == tmux.PendingInput && !forceFlag {
+			fmt.Fprintf(os.Stderr, "destination window %q has pending input %q - use --force to send anyway, or wait until input is cleared\n", w.Name, pendingText)
+			skippedTyping++
+			continue
+		}
+		if state == tmux.NotAtPrompt {
 			if strictFlag {
-				if state == tmux.PendingInput {
-					fmt.Fprintf(os.Stderr, "destination window %q has pending input (agent or user is typing) - message not sent\n", w.Name)
-				} else {
-					fmt.Fprintf(os.Stderr, "destination window %q is not at prompt (Claude may be generating or showing a form) - message not sent\n", w.Name)
-				}
+				fmt.Fprintf(os.Stderr, "destination window %q is not at prompt (Claude may be generating or showing a form) - message not sent\n", w.Name)
 				skippedTyping++
 				continue
 			}
-			// Non-strict: warn on stderr, but send anyway
-			if state == tmux.PendingInput {
-				fmt.Fprintf(os.Stderr, "warning: window %q has pending input, sending anyway\n", w.Name)
-			} else {
-				fmt.Fprintf(os.Stderr, "warning: window %q may be busy, sending anyway\n", w.Name)
-			}
+			fmt.Fprintf(os.Stderr, "warning: window %q may be busy, sending anyway\n", w.Name)
 		}
 
 		if err := tmux.AddMessage(target, message); err != nil {
