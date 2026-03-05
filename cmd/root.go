@@ -95,15 +95,13 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// Determine session
 	var session string
 	var currentWindowIndex int
-	var currentPaneID string
 
 	if tmux.IsInsideTmux() {
 		var err error
-		currentSession, currentWindowIdx, paneID, err := tmux.GetCurrentContext()
+		currentSession, currentWindowIdx, _, err := tmux.GetCurrentContext()
 		if err != nil {
 			return fmt.Errorf("failed to get tmux context: %w", err)
 		}
-		currentPaneID = paneID
 		if sessionFlag != "" {
 			session = sessionFlag
 			currentWindowIndex = -1 // Different session, don't exclude any window
@@ -219,8 +217,6 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Report results
-	_ = currentPaneID // unused but kept for future use
-
 	skipped := skippedTyping + skippedNoClaude
 	if failed > 0 || skipped > 0 {
 		var parts []string
@@ -231,7 +227,7 @@ func runAdd(cmd *cobra.Command, args []string) error {
 			parts = append(parts, fmt.Sprintf("%d skipped (no Claude)", skippedNoClaude))
 		}
 		if skippedTyping > 0 {
-			parts = append(parts, fmt.Sprintf("%d blocked (busy)", skippedTyping))
+			parts = append(parts, fmt.Sprintf("%d blocked (pending input)", skippedTyping))
 		}
 		if failed > 0 {
 			parts = append(parts, fmt.Sprintf("%d failed", failed))
